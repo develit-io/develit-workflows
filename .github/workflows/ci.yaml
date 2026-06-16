@@ -116,7 +116,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        project: ${{ fromJSON(needs.targets.outputs.targets) }}
+        # skip-build skipne targets → output '' → fromJSON('') by byl startup_failure; || '[]' = prázdná matice (build se skipne přes if výše)
+        project: ${{ fromJSON(needs.targets.outputs.targets || '[]') }}
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
