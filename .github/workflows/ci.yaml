@@ -1,0 +1,136 @@
+name: ci-sdk
+
+# Reusable CI (workflow_call) — obaluje `bunx ci-sdk`. Consumer = Nx workspace na Bunu
+# s @develit-io/ci-sdk v devDeps. Reference: uses: develit-io/develit-workflows/.github/workflows/ci.yaml@v1
+on:
+  workflow_call:
+    inputs:
+      skip-codecheck: { type: boolean, default: false }
+      # Override codecheck prikazu (default `bunx biome ci`) - napr. `bun run lint` pro eslint consumery.
+      codecheck-command: { type: string, default: '' }
+      skip-nx-sync: { type: boolean, default: false }
+      skip-wrangler-types: { type: boolean, default: false }
+      skip-typecheck: { type: boolean, default: false }
+      skip-tests: { type: boolean, default: false }
+      # Supply-chain gate: vynuti bunfig [install] minimumReleaseAge >= 172800. Escape hatch pro repa bez bunfigu.
+      skip-release-age: { type: boolean, default: false }
+      skip-build: { type: boolean, default: false }
+      # Affected: jen dotčené projekty (nx affected + nx-set-shas). Jinak run-many (vše).
+      affected: { type: boolean, default: false }
+      # Pinned (reproducible toolchain; >= 1.3 nutne pro bunfig minimumReleaseAge). Konzument muze prepsat.
+      bun-version: { type: string, default: '1.3.12' }
+    secrets:
+      # GH Packages read token pro @develit-io/* private install. Cross-org = per-zakaznik token;
+      # nepredano (same-org) -> fallback na caller GITHUB_TOKEN (vyzaduje permissions: packages: read).
+      DEVELIT_PACKAGES_TOKEN:
+        required: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # actions:read → nrwl/nx-set-shas dotazuje Actions API (poslední úspěšný run na větvi) na push eventech.
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Plná historie → nx affected base/head + nx-set-shas.
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install --frozen-lockfile
+        env:
+          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
+
+      # Nastaví NX_BASE / NX_HEAD pro nx affected (PR: merge-base; push: poslední úspěšný commit).
+      - uses: nrwl/nx-set-shas@v5
+
+      - name: ci-sdk check
+        env:
+          AFFECTED: ${{ inputs.affected }}
+          SKIP_CODECHECK: ${{ inputs.skip-codecheck }}
+          CODECHECK_CMD: ${{ inputs.codecheck-command }}
+          SKIP_NX_SYNC: ${{ inputs.skip-nx-sync }}
+          SKIP_WRANGLER_TYPES: ${{ inputs.skip-wrangler-types }}
+          SKIP_TYPECHECK: ${{ inputs.skip-typecheck }}
+          SKIP_TESTS: ${{ inputs.skip-tests }}
+          SKIP_RELEASE_AGE: ${{ inputs.skip-release-age }}
+        run: |
+          args=()
+          [ "$AFFECTED" = "true" ] && args+=(--affected)
+          [ "$SKIP_CODECHECK" = "true" ] && args+=(--skip-codecheck)
+          [ -n "$CODECHECK_CMD" ] && args+=(--codecheck-cmd "$CODECHECK_CMD")
+          [ "$SKIP_NX_SYNC" = "true" ] && args+=(--skip-nx-sync)
+          [ "$SKIP_WRANGLER_TYPES" = "true" ] && args+=(--skip-wrangler-types)
+          [ "$SKIP_TYPECHECK" = "true" ] && args+=(--skip-typecheck)
+          [ "$SKIP_TESTS" = "true" ] && args+=(--skip-tests)
+          [ "$SKIP_RELEASE_AGE" = "true" ] && args+=(--skip-release-age)
+          bunx ci-sdk check "${args[@]}"
+
+  # Spočítá projekty s 'build' targetem (affected-aware) → JSON pro matrix.
+  targets:
+    if: ${{ !inputs.skip-build }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      targets: ${{ steps.t.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+        env:
+          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
+      - uses: nrwl/nx-set-shas@v5
+      - id: t
+        env:
+          AFFECTED: ${{ inputs.affected }}
+        run: |
+          args=()
+          [ "$AFFECTED" = "true" ] && args+=(--affected)
+          bunx ci-sdk build-targets "${args[@]}"
+
+  build:
+    needs: targets
+    if: ${{ !inputs.skip-build && needs.targets.outputs.targets != '[]' && needs.targets.outputs.targets != '' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        project: ${{ fromJSON(needs.targets.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+        env:
+          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
+      - name: Build project
+        env:
+          PROJECT: ${{ matrix.project }}
+        run: bunx nx build "$PROJECT"
