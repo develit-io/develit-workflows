@@ -202,7 +202,9 @@ jobs:
   # Stage 3: resolve URL → consumer smoke → finalni komentar.
   smoke:
     needs: [provision, deploy]
-    if: github.event.action != 'closed'
+    # !cancelled() + deploy.result==success: smoke (a finální preview comment) běží i když seed skipnut.
+    # Jinak always() na deploy propaguje skip ze seed → smoke skipped → comment zůstane na "se nasazuje…".
+    if: ${{ !cancelled() && needs.deploy.result == 'success' && github.event.action != 'closed' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read # explicitni perms blok zahodi default → checkout potrebuje contents:read
