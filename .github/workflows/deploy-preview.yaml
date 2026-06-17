@@ -29,7 +29,7 @@ name: deploy-sdk preview
 on:
   workflow_call:
     inputs:
-      bun-version: { type: string, default: latest }
+      bun-version: { type: string, default: '1.3.12' }
       smoke-script: { type: string, default: scripts/smoke.sh }
       # CSV jmen GH secrets, ktere se exportuji do env pred provision/deploy —
       # topology.ts je cte pres process.env (vars workeru). Hodnoty se maskuji.
