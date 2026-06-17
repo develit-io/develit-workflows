@@ -32,6 +32,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      packages: read # GH Packages pull (@develit-io/*) — job perms jinak přebijí callerův grant → 403
     steps:
       - uses: actions/checkout@v6
         with:
@@ -84,6 +85,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      packages: read
     outputs:
       targets: ${{ steps.t.outputs.targets }}
     steps:
@@ -114,6 +116,9 @@ jobs:
     needs: targets
     if: ${{ !inputs.skip-build && needs.targets.outputs.targets != '[]' && needs.targets.outputs.targets != '' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read # GH Packages pull (@develit-io/*) — bez explicit bloku nemusí mít default token scope
     strategy:
       matrix:
         # skip-build skipne targets → output '' → fromJSON('') by byl startup_failure; || '[]' = prázdná matice (build se skipne přes if výše)
