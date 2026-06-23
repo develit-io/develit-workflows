@@ -221,3 +221,34 @@ jobs:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: bash "$SMOKE_SCRIPT"
+
+  # Po stable deployi: GitHub Release s auto-gen notes (`bunx deploy-sdk releaselog`).
+  # Gated topology.releaselog.enabledByEnv[env] → neopt-in repo gate SKIPNE pred gh voláním
+  # (contents:read jim staci). Opt-in repo MUSI grantnout contents:write na svou deploy: invocation
+  # (jinak gh release 403). continue-on-error → release fail neshodi deploy (mirror platform cd.yaml).
+  releaselog:
+    needs: [provision, deploy]
+    if: ${{ !cancelled() && needs.deploy.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    continue-on-error: true
+    env:
+      STABLE_ENV: ${{ github.ref_name }} # caller branch → SDK env gate (releaselog.enabledByEnv)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+      - uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+        env:
+          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
+      - run: bunx deploy-sdk releaselog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
