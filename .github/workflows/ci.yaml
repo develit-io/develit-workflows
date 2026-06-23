@@ -34,7 +34,7 @@ jobs:
       actions: read
       packages: read # GH Packages pull (@develit-io/*) — job perms jinak přebijí callerův grant → 403
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Plná historie → nx affected base/head + nx-set-shas.
           fetch-depth: 0
@@ -43,7 +43,7 @@ jobs:
         with:
           bun-version: ${{ inputs.bun-version }}
 
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -89,13 +89,13 @@ jobs:
     outputs:
       targets: ${{ steps.t.outputs.targets }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ inputs.bun-version }}
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -124,11 +124,11 @@ jobs:
         # skip-build skipne targets → output '' → fromJSON('') by byl startup_failure; || '[]' = prázdná matice (build se skipne přes if výše)
         project: ${{ fromJSON(needs.targets.outputs.targets || '[]') }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ inputs.bun-version }}
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
