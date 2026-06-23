@@ -1,0 +1,64 @@
+name: deploy-sdk gc-previews
+
+# Reusable orphan GC (workflow_call) — obaluje `bunx deploy-sdk gc`. Smaze per-PR zdroje ZAVRENYCH PR
+# (close-cleanup se nespustil / smazana branch / zavod). Otevrene PR se NIKDY nemazou (zadny TTL).
+# apply pocita caller: cron = vzdy apply, dispatch = podle checkboxu. Consumer dodá tenký wrapper:
+#
+#   on:
+#     schedule: [{ cron: '0 3 * * 1' }]   # pondeli 03:00 UTC
+#     workflow_dispatch: { inputs: { apply: { type: boolean, default: false } } }
+#   concurrency: { group: gc-previews, cancel-in-progress: false }
+#   jobs:
+#     gc:
+#       uses: develit-io/develit-workflows/.github/workflows/gc-previews.yaml@v1
+#       permissions: { contents: read, pull-requests: read, packages: read }
+#       secrets: inherit
+#       with:
+#         apply: ${{ github.event_name == 'schedule' || inputs.apply }}
+#
+# Cross-org consumer (inherit GH nepodporuje mimo org) preda secrets explicitne:
+#       secrets:
+#         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#         DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN }}  # GH Packages read (@develit-io/*)
+on:
+  workflow_call:
+    inputs:
+      apply: { type: boolean, default: false } # true = realne mazat (jinak dry-run)
+      bun-version: { type: string, default: '1.3.12' }
+    secrets:
+      CLOUDFLARE_API_TOKEN: { required: true }
+      CLOUDFLARE_ACCOUNT_ID: { required: true }
+      # GH Packages read token pro @develit-io/* private install. Nepredano (same-org) -> fallback
+      # na caller GITHUB_TOKEN; cross-org preda per-zakaznik token.
+      DEVELIT_PACKAGES_TOKEN: { required: false }
+
+jobs:
+  gc:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      packages: read # install privatniho @develit-io/* (same-org fallback na GITHUB_TOKEN)
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      GH_TOKEN: ${{ github.token }}
+      GC_APPLY: ${{ inputs.apply && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+        env:
+          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
+      # package je gh-free → cisla otevrenych PR dodame z gh pres --open-prs
+      - run: |
+          OPEN=$(gh pr list --state open --json number --jq '[.[].number] | join(",")')
+          bunx deploy-sdk gc --open-prs "$OPEN"

@@ -1,0 +1,64 @@
+name: deploy-sdk seed-bake
+
+# Reusable anonymizovany prod-data seeding — "bake" smycka (workflow_call; viz deploy-sdk docs/seeding.md).
+# Scheduled job s PROD creds: export prod D1 → konzument anonymizuje (topology.seed.anonymizeCommand)
+# → upload sanitized dumpu do NON-PROD R2. Preview deploy si dump jen pullne (seed job v preview.yaml).
+# PROD creds ziji JEN tady — do preview se nikdy nedostanou (GDPR). Consumer dodá tenký wrapper:
+#
+#   on:
+#     schedule: [{ cron: '0 3 * * *' }]   # nightly 03:00 UTC — uprav dle potreby
+#     workflow_dispatch:                  # manualni refresh dumpu (prvni bake / on-demand)
+#   concurrency: { group: seed-bake, cancel-in-progress: false }
+#   jobs:
+#     bake:
+#       uses: develit-io/develit-workflows/.github/workflows/seed-bake.yaml@v1
+#       secrets: inherit
+#
+# Cross-org consumer (inherit GH nepodporuje mimo org) preda secrets explicitne:
+#       secrets:
+#         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#         SEED_ANON_KEY: ${{ secrets.SEED_ANON_KEY }}
+#         DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN }}  # GH Packages read (@develit-io/*)
+#
+# Single-account default (ambient CLOUDFLARE_*). Multi-account (dbu-txs): bake potrebuje PROD read
+# (export D1) i NON-PROD write (R2 upload) → per-env tokeny dnes nejsou v teto reusable; takovy konzument
+# si drzi vlastni seed-bake.yml s lokalnimi kroky, dokud sem per-env secret surface nepribude.
+on:
+  workflow_call:
+    inputs:
+      bun-version: { type: string, default: '1.3.12' }
+    secrets:
+      CLOUDFLARE_API_TOKEN: { required: true }
+      CLOUDFLARE_ACCOUNT_ID: { required: true }
+      # Salt pro deterministickou anonymizaci — STABILNI secret. Zmena = jine vystupy → rozbije
+      # referencni integritu mezi po sobe jdoucimi bakes. Nastav jednou, nemen.
+      SEED_ANON_KEY: { required: true }
+      # GH Packages read token pro @develit-io/* private install. Nepredano (same-org) -> fallback
+      # na caller GITHUB_TOKEN; cross-org preda per-zakaznik token.
+      DEVELIT_PACKAGES_TOKEN: { required: false }
+
+jobs:
+  bake:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read # install privatniho @develit-io/* (same-org fallback na GITHUB_TOKEN)
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      SEED_ANON_KEY: ${{ secrets.SEED_ANON_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ inputs.bun-version }}
+      - uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+        env:
+          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
+      - run: bunx deploy-sdk seed --bake
