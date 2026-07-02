@@ -1,7 +1,8 @@
 name: deploy-sdk preview
 
 # Reusable PR preview (workflow_call) — obaluje `bunx deploy-sdk provision/deploy/cleanup`.
-# Consumer dodá topology.ts + scripts/smoke.sh a tenký wrapper s pull_request triggerem:
+# Consumer dodá topology.ts a tenký wrapper s pull_request triggerem (health-check je centralni;
+# volitelne consumer testy pres smoke-script input, run-if-exists):
 #
 #   on:
 #     pull_request:
@@ -202,7 +203,7 @@ jobs:
           path: .preview/url-${{ matrix.worker }}.txt
           if-no-files-found: error
 
-  # Stage 3: resolve URL → consumer smoke → finalni komentar.
+  # Stage 3: resolve URL → health-check (+ volitelne consumer testy) → finalni komentar.
   smoke:
     needs: [provision, deploy]
     # !cancelled() + deploy.result==success: smoke (a finální preview comment) běží i když seed skipnut.
@@ -240,17 +241,56 @@ jobs:
             echo "entrypoint_url=$ep"
             echo "table<<TABLE_EOF"; printf '%s' "$table"; echo "TABLE_EOF"
           } >> "$GITHUB_OUTPUT"
-      - name: Smoke check (consumer-provided)
+      # Centralizovany health-check: entrypoint vraci 2xx/3xx = deploy nasazeny.
+      # 3xx = redirect na ZT Access login → worker zije + chraneny (bez service tokenu).
+      # Retry budget 30×10 s = 5 min (shodne s drivejsimi consumer smoke scripty): fresh
+      # workers.dev routa propaguje 1–90 s. Pozn.: 1. issuance Total TLS certu noveho
+      # hostname ~10 min muze budget prezrat — jednorazova vec, re-run staci.
+      - name: Health check
+        env:
+          ENTRYPOINT_URL: ${{ steps.urls.outputs.entrypoint_url }}
+          # Access (accessByEnv + serviceToken): posilame CF-Access-Client-Id/Secret headery.
+          # Secrets volitelne — bez Accessu zustanou prazdne (no-op).
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ENTRYPOINT_URL" ]; then
+            echo "⚠ health-check skip — entrypoint nemá URL (workersDev:false bez custom domény)"
+            exit 0
+          fi
+          URL="${ENTRYPOINT_URL%/}/"
+          ACCESS_HDRS=()
+          [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && ACCESS_HDRS=(-H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}")
+          CURL_TMO=(--connect-timeout 5 --max-time 10)
+          RETRIES=${RETRIES:-30}
+          SLEEP=${SLEEP:-10}
+          for ((i = 1; i <= RETRIES; i++)); do
+            code=$(curl -s "${CURL_TMO[@]}" ${ACCESS_HDRS[@]+"${ACCESS_HDRS[@]}"} -o /dev/null -w '%{http_code}' "$URL" 2>/dev/null) || code=000
+            if [[ "$code" =~ ^[23] ]]; then
+              echo "✓ health OK — ${URL} odpovídá (http=${code})"
+              exit 0
+            fi
+            echo "… ještě nedostupné (cert/route propagace, http=${code}, pokus ${i}/${RETRIES}), čekám ${SLEEP}s — ${URL}"
+            [ "$i" -lt "$RETRIES" ] && sleep "$SLEEP"
+          done
+          echo "✗ health FAIL — ${URL} nedostupné po ${RETRIES}×${SLEEP}s (cert nenaroloval / worker down)" >&2
+          exit 1
+      # Volitelne consumer testy (drive povinny smoke.sh — readiness uz resi Health check vyse).
+      - name: Consumer tests (optional)
         env:
           ENTRYPOINT_URL: ${{ steps.urls.outputs.entrypoint_url }}
           WORKER_URLS: ${{ steps.urls.outputs.worker_urls }}
           ENVIRONMENT_EXPECTED: preview
           SMOKE_SCRIPT: ${{ inputs.smoke-script }}
-          # Access (accessByEnv + serviceToken): smoke posila CF-Access-Client-Id/Secret headery.
-          # Secrets volitelne — bez Accessu zustanou prazdne (no-op).
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-        run: bash "$SMOKE_SCRIPT"
+        run: |
+          if [ -f "$SMOKE_SCRIPT" ]; then
+            bash "$SMOKE_SCRIPT"
+          else
+            echo "no consumer test script ($SMOKE_SCRIPT) — skip"
+          fi
 
       - if: success()
         uses: marocchino/sticky-pull-request-comment@v3
@@ -273,7 +313,7 @@ jobs:
           header: preview
           message: |
             ### ❌ Preview pro PR #${{ github.event.number }} selhal
-            Deploy nebo smoke check neprošel. [Detail běhu](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            Deploy nebo health check neprošel. [Detail běhu](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
   cleanup:
     if: github.event.action == 'closed'
