@@ -168,6 +168,10 @@ jobs:
         with:
           name: url-all
           path: .preview/url-*.txt
+          # `.preview/` je hidden dir — glob path bez tohohle flagu hidden soubory vynechá
+          # (upload-artifact v4.4+ default) → if-no-files-found: error shodil jinak zelený deploy.
+          # deploy-stable matrix to nepotká: exact path (bez globu) se hidden filtru vyhne.
+          include-hidden-files: true
           if-no-files-found: error
 
   smoke:
