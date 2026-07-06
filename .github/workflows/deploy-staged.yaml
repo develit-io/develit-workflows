@@ -36,6 +36,11 @@ on:
       env-passthrough: { type: string, default: '' }
       # Bez D1 (zadne migrace) → skip-migrate: true preskoci migrate krok.
       skip-migrate: { type: boolean, default: false }
+      # Affected-only deploy (nx monorepa): nx-set-shas najde SHA posledniho uspesneho runu na
+      # teto vetvi → deploy jen zasazenych workeru (nx graf vc. dependentu). FAIL-OPEN: bez
+      # baseline, pri nx chybe nebo zmene deploy kontraktu (topology/bun.lock/bunfig/package.json/
+      # .github/workflows) se deployuje vsechno. Vyzaduje nx v repu konzumenta.
+      affected: { type: boolean, default: false }
     # Same-org consumer pouziva `secrets: inherit`; cross-org (jiny org) predava vzdy explicitne
     # (GH inherit mimo org nefunguje — plati nezavisle na tom, ze SDK je pod develit-io).
     # Deklarace nevadi inherit consumerum (inherit required secrets splnuje).
@@ -57,12 +62,23 @@ jobs:
     permissions:
       contents: write # releaselog (gh release) — gate-off konzumentum staci, GH perms validuje pri startu
       packages: read # GH Packages pull (@develit-io/*) — job perms jinak přebijí callerův grant → 403
+      actions: read # nx-set-shas (affected) cte historii runu pres Actions API
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       STABLE_ENV: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # affected: git diff base..head potrebuje historii (shallow clone by base SHA nemel)
+          fetch-depth: ${{ inputs.affected && '0' || '1' }}
+      # Baseline pro affected: SHA posledniho USPESNEHO runu tohoto workflow na teto vetvi →
+      # exportuje NX_BASE/NX_HEAD do env. Prvni run na vetvi baseline nema → fail-open (vsechno).
+      - uses: nrwl/nx-set-shas@v4
+        if: inputs.affected
+        with:
+          main-branch-name: ${{ github.ref_name }}
+          error-on-no-successful-workflow: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ inputs.bun-version }}
@@ -104,6 +120,7 @@ jobs:
           PREVIEW_IDS: ${{ steps.p.outputs.ids }}
           SKIP_PROVISION: '1' # provision probehl krok vyse (ids v PREVIEW_IDS)
           SKIP_MIGRATIONS: '1' # migrace probehly v Migrate kroku (nebo zadne nejsou)
+          AFFECTED: ${{ inputs.affected && '1' || '' }} # + NX_BASE/NX_HEAD z nx-set-shas
         run: bunx deploy-sdk deploy-staged
       - uses: actions/upload-artifact@v7
         with:
@@ -112,7 +129,8 @@ jobs:
           # `.preview/` je hidden dir — glob path bez tohohle flagu hidden soubory vynechá
           # (upload-artifact v4.4+ default).
           include-hidden-files: true
-          if-no-files-found: error
+          # warn (ne error): affected deploy muze legitimne deploynout 0 workeru (docs-only push)
+          if-no-files-found: warn
       # Centralizovany health-check: entrypoint vraci 2xx/3xx = deploy nasazeny.
       # 3xx = redirect na ZT Access login → worker zije + chraneny (bez service tokenu).
       # Retry budget 30×10 s = 5 min: fresh routa propaguje 1–90 s. Pozn.: 1. issuance
