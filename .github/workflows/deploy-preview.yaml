@@ -1,6 +1,14 @@
 name: deploy-sdk preview
 
-# Reusable PR preview (workflow_call) — obaluje `bunx deploy-sdk provision/deploy/cleanup`.
+# Reusable PR preview (workflow_call) — JEDEN job: sticky comment hned → install → provision →
+# seed-gated migrate+seed → staged deploy (SKIP_PROVISION, poradi auto-derived ze service grafu)
+# → health-check → finalni komentar. Cleanup zavreneho PR zustava samostatny job.
+#
+# Proc jeden job (vzor deploy-staged.yaml): multi-job varianta platila 3-4× checkout+setup+install
+# (~1-1,5 min kazdy) + artifact roundtrip pro URL. Single job = 1 install, provision ids se predaji
+# krokum (PREVIEW_IDS + SKIP_PROVISION=1). Seed gate zustava: migrate/seed step fail = deploy krok
+# se nespusti. Releaselog tu zamerne neni (stable-only, hard-fail bez STABLE_ENV).
+#
 # Consumer dodá topology.ts a tenký wrapper s pull_request triggerem (health-check je centralni;
 # volitelne consumer testy pres smoke-script input, run-if-exists):
 #
@@ -51,25 +59,26 @@ on:
       ENV_PASSTHROUGH_JSON: { required: false }
 
 jobs:
-  # Stage 1: sdilene zdroje JEDNOU + emit matice workeru + entrypoint pro smoke/comment.
-  provision:
+  preview:
     if: github.event.action != 'closed'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write # sticky komentar
       packages: read # GH Packages pull (@develit-io/*) — job perms jinak přebijí callerův grant → 403
-    outputs:
-      ids: ${{ steps.p.outputs.ids }}
-      matrix: ${{ steps.p.outputs.matrix }}
-      entrypoint: ${{ steps.p.outputs.entrypoint }}
-      entrypointUrl: ${{ steps.p.outputs.entrypointUrl }}
-      seed: ${{ steps.p.outputs.seed }} # 'true' → explicitni migrate+seed pred deployem (viz seed job)
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # STABLE_ENV se tu NIKDY nesetuje — resolveDeployEnv ho cte prednostne pred PR_NUMBER.
       PR_NUMBER: ${{ github.event.number }}
     steps:
+      # Prvni krok, jeste pred checkoutem (cista API akce) — feedback v PR za par sekund.
+      - uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: preview
+          message: |
+            ### ⏳ Preview pro PR #${{ github.event.number }} se nasazuje…
+            [Detail běhu](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
       - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
@@ -82,12 +91,6 @@ jobs:
       - run: bun install --frozen-lockfile
         env:
           DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
-      - uses: marocchino/sticky-pull-request-comment@v3
-        with:
-          header: preview
-          message: |
-            ### ⏳ Preview pro PR #${{ github.event.number }} se nasazuje…
-            [Detail běhu](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
       - name: Env passthrough (topology vars)
         if: inputs.env-passthrough != ''
         env:
@@ -102,164 +105,61 @@ jobs:
             fi
           done
       - id: p
+        name: Provision
         run: bunx deploy-sdk provision
-
-  # Stage 1.5: JEN kdyz seed zapnuty (provision.outputs.seed == 'true'). Import dat potrebuje schema →
-  # explicitni migrate+seed pred deployem; deploy pak preskoci inline migrace (SKIP_MIGRATIONS=1, jak stable).
-  # Seed vypnuty → job se preskoci a deploy migruje inline jako doposud (zpetne kompatibilni).
-  seed:
-    needs: provision
-    if: github.event.action != 'closed' && needs.provision.outputs.seed == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      PR_NUMBER: ${{ github.event.number }}
-      PREVIEW_IDS: ${{ needs.provision.outputs.ids }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ inputs.bun-version }}
-      - uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-      - run: bun install --frozen-lockfile
+      # Seed zapnuty (provision.seed) → import dat potrebuje schema: explicitni migrate+seed pred
+      # deployem; deploy pak preskoci inline migrace. Seed vypnuty → oba kroky skip a deploy migruje
+      # inline jako doposud (zpetne kompatibilni). Step fail = deploy krok se nespusti (implicitni
+      # success() gate — zadny half-migrated + half-deployed stav).
+      - name: Migrate
+        if: steps.p.outputs.seed == 'true'
         env:
-          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
-      - name: Env passthrough (topology vars pro migrate)
-        if: inputs.env-passthrough != ''
+          PREVIEW_IDS: ${{ steps.p.outputs.ids }}
+        run: bunx deploy-sdk migrate
+      - name: Seed
+        if: steps.p.outputs.seed == 'true'
         env:
-          SECRETS_JSON: ${{ secrets.ENV_PASSTHROUGH_JSON || toJSON(secrets) }}
-          KEYS: ${{ inputs.env-passthrough }}
-        run: |
-          for k in ${KEYS//,/ }; do
-            v=$(printf '%s' "$SECRETS_JSON" | jq -r --arg k "$k" '.[$k] // empty')
-            if [ -n "$v" ]; then
-              echo "::add-mask::$v"
-              printf '%s<<__EOF__\n%s\n__EOF__\n' "$k" "$v" >> "$GITHUB_ENV"
-            fi
-          done
-      - run: bunx deploy-sdk migrate
-      - run: bunx deploy-sdk seed
-
-  # Stage 2: kazdy worker paralelne. fail-fast:false → jeden pad nezabije ostatni, smoke to nahlasi.
-  deploy:
-    needs: [provision, seed]
-    # always() → poustej i kdyz seed job skipnuty (seed vypnuty). Blokuj jen kdyz provision/seed selhal
-    # (spatna migrace/seed nesmi deployovat). skipped seed = OK → inline migrace jako doposud.
-    if: ${{ always() && github.event.action != 'closed' && needs.provision.result == 'success' && needs.seed.result != 'failure' && needs.seed.result != 'cancelled' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read
-    strategy:
-      fail-fast: false
-      matrix:
-        worker: ${{ fromJson(needs.provision.outputs.matrix) }}
-    env:
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-      PR_NUMBER: ${{ github.event.number }}
-      PREVIEW_IDS: ${{ needs.provision.outputs.ids }}
-      WORKER: ${{ matrix.worker }}
-      # seed zapnuty → seed job uz odmigroval; deploy preskoci inline migrace (jako stable pipeline).
-      SKIP_MIGRATIONS: ${{ needs.provision.outputs.seed == 'true' && '1' || '' }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ inputs.bun-version }}
-      - uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-      - run: bun install --frozen-lockfile
+          PREVIEW_IDS: ${{ steps.p.outputs.ids }}
+        run: bunx deploy-sdk seed
+      # Staged deploy vsech workeru (paralelne v ramci stage, seriove mezi stages) — preview
+      # potrebuje kompletni per-PR env, zadny AFFECTED. Zapise .preview/url-<worker>.txt.
+      - name: Deploy (staged)
         env:
-          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
-      - name: Env passthrough (topology vars)
-        if: inputs.env-passthrough != ''
-        env:
-          SECRETS_JSON: ${{ secrets.ENV_PASSTHROUGH_JSON || toJSON(secrets) }}
-          KEYS: ${{ inputs.env-passthrough }}
-        run: |
-          for k in ${KEYS//,/ }; do
-            v=$(printf '%s' "$SECRETS_JSON" | jq -r --arg k "$k" '.[$k] // empty')
-            if [ -n "$v" ]; then
-              echo "::add-mask::$v"
-              printf '%s<<__EOF__\n%s\n__EOF__\n' "$k" "$v" >> "$GITHUB_ENV"
-            fi
-          done
-      - run: bunx deploy-sdk deploy
+          PREVIEW_IDS: ${{ steps.p.outputs.ids }}
+          SKIP_PROVISION: '1' # provision probehl krok vyse (ids v PREVIEW_IDS)
+          # seed zapnuty → migrace probehly v Migrate kroku; jinak inline migrace (jako doposud)
+          SKIP_MIGRATIONS: ${{ steps.p.outputs.seed == 'true' && '1' || '' }}
+        run: bunx deploy-sdk deploy-staged
       - uses: actions/upload-artifact@v7
         with:
-          name: url-${{ matrix.worker }}
-          path: .preview/url-${{ matrix.worker }}.txt
+          name: url-all
+          path: .preview/url-*.txt
+          # `.preview/` je hidden dir — glob path bez tohohle flagu hidden soubory vynechá
+          # (upload-artifact v4.4+ default).
+          include-hidden-files: true
+          # error (ne warn jako u staged): preview nema affected → 0 url souboru = bug
           if-no-files-found: error
-
-  # Stage 3: resolve URL → health-check (+ volitelne consumer testy) → finalni komentar.
-  smoke:
-    needs: [provision, deploy]
-    # !cancelled() + deploy.result==success: smoke (a finální preview comment) běží i když seed skipnut.
-    # Jinak always() na deploy propaguje skip ze seed → smoke skipped → comment zůstane na "se nasazuje…".
-    if: ${{ !cancelled() && needs.deploy.result == 'success' && github.event.action != 'closed' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read # explicitni perms blok zahodi default → checkout potrebuje contents:read
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: url-*
-          path: urls
-          merge-multiple: true
-      # Postav WORKER_URLS (JSON {base:url}) + markdown tabulku + resolve ENTRYPOINT_URL.
-      - id: urls
-        env:
-          ENTRYPOINT: ${{ needs.provision.outputs.entrypoint }}
-          ENTRYPOINT_URL_DET: ${{ needs.provision.outputs.entrypointUrl }} # neprazdne = custom domena
-        run: |
-          json='{}'
-          table=''
-          for f in urls/url-*.txt; do
-            base=$(basename "$f" .txt); base=${base#url-}
-            u=$(cat "$f")
-            json=$(printf '%s' "$json" | jq --arg b "$base" --arg u "$u" '. + {($b): $u}')
-            table="${table}| ${base} | ${u} |"$'\n'
-          done
-          ep="$ENTRYPOINT_URL_DET"
-          [ -z "$ep" ] && ep=$(cat "urls/url-${ENTRYPOINT}.txt")
-          {
-            echo "worker_urls=$(printf '%s' "$json" | jq -c .)"
-            echo "entrypoint_url=$ep"
-            echo "table<<TABLE_EOF"; printf '%s' "$table"; echo "TABLE_EOF"
-          } >> "$GITHUB_OUTPUT"
       # Centralizovany health-check: entrypoint vraci 2xx/3xx = deploy nasazeny.
       # 3xx = redirect na ZT Access login → worker zije + chraneny (bez service tokenu).
-      # Retry budget 30×10 s = 5 min (shodne s drivejsimi consumer smoke scripty): fresh
-      # workers.dev routa propaguje 1–90 s. Pozn.: 1. issuance Total TLS certu noveho
-      # hostname ~10 min muze budget prezrat — jednorazova vec, re-run staci.
+      # Retry budget 30×10 s = 5 min: fresh workers.dev routa propaguje 1–90 s. Pozn.: 1. issuance
+      # Total TLS certu noveho hostname ~10 min muze budget prezrat — jednorazova vec, re-run staci.
       - name: Health check
         env:
-          ENTRYPOINT_URL: ${{ steps.urls.outputs.entrypoint_url }}
+          ENTRYPOINT: ${{ steps.p.outputs.entrypoint }}
+          ENTRYPOINT_URL_DET: ${{ steps.p.outputs.entrypointUrl }}
           # Access (accessByEnv + serviceToken): posilame CF-Access-Client-Id/Secret headery.
           # Secrets volitelne — bez Accessu zustanou prazdne (no-op).
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          if [ -z "$ENTRYPOINT_URL" ]; then
+          ep="$ENTRYPOINT_URL_DET"
+          [ -z "$ep" ] && [ -f ".preview/url-${ENTRYPOINT}.txt" ] && ep=$(cat ".preview/url-${ENTRYPOINT}.txt")
+          if [ -z "$ep" ]; then
             echo "⚠ health-check skip — entrypoint nemá URL (workersDev:false bez custom domény)"
             exit 0
           fi
-          URL="${ENTRYPOINT_URL%/}/"
+          URL="${ep%/}/"
           ACCESS_HDRS=()
           [ -n "${CF_ACCESS_CLIENT_ID:-}" ] && ACCESS_HDRS=(-H "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}" -H "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}")
           CURL_TMO=(--connect-timeout 5 --max-time 10)
@@ -276,22 +176,46 @@ jobs:
           done
           echo "✗ health FAIL — ${URL} nedostupné po ${RETRIES}×${SLEEP}s (cert nenaroloval / worker down)" >&2
           exit 1
-      # Volitelne consumer testy (drive povinny smoke.sh — readiness uz resi Health check vyse).
+      # Volitelne consumer testy (readiness uz resi Health check vyse).
       - name: Consumer tests (optional)
         env:
-          ENTRYPOINT_URL: ${{ steps.urls.outputs.entrypoint_url }}
-          WORKER_URLS: ${{ steps.urls.outputs.worker_urls }}
-          ENVIRONMENT_EXPECTED: preview
+          ENTRYPOINT: ${{ steps.p.outputs.entrypoint }}
+          ENTRYPOINT_URL_DET: ${{ steps.p.outputs.entrypointUrl }}
+          # envKey z provision = 'preview' (branch→env mapping resi topology, ne YAML)
+          ENVIRONMENT_EXPECTED: ${{ steps.p.outputs.envKey }}
           SMOKE_SCRIPT: ${{ inputs.smoke-script }}
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
         run: |
           if [ -f "$SMOKE_SCRIPT" ]; then
-            bash "$SMOKE_SCRIPT"
+            json='{}'
+            for f in .preview/url-*.txt; do
+              base=$(basename "$f" .txt); base=${base#url-}
+              json=$(printf '%s' "$json" | jq --arg b "$base" --arg u "$(cat "$f")" '. + {($b): $u}')
+            done
+            ep="$ENTRYPOINT_URL_DET"
+            [ -z "$ep" ] && ep=$(cat ".preview/url-${ENTRYPOINT}.txt")
+            WORKER_URLS="$json" ENTRYPOINT_URL="$ep" bash "$SMOKE_SCRIPT"
           else
             echo "no consumer test script ($SMOKE_SCRIPT) — skip"
           fi
-
+      # URL tabulka + entrypoint pro finalni komentar — primo z .preview/, zadny artifact roundtrip.
+      - id: urls
+        env:
+          ENTRYPOINT: ${{ steps.p.outputs.entrypoint }}
+          ENTRYPOINT_URL_DET: ${{ steps.p.outputs.entrypointUrl }}
+        run: |
+          table=''
+          for f in .preview/url-*.txt; do
+            base=$(basename "$f" .txt); base=${base#url-}
+            table="${table}| ${base} | $(cat "$f") |"$'\n'
+          done
+          ep="$ENTRYPOINT_URL_DET"
+          [ -z "$ep" ] && [ -f ".preview/url-${ENTRYPOINT}.txt" ] && ep=$(cat ".preview/url-${ENTRYPOINT}.txt")
+          {
+            echo "entrypoint_url=$ep"
+            echo "table<<TABLE_EOF"; printf '%s' "$table"; echo "TABLE_EOF"
+          } >> "$GITHUB_OUTPUT"
       - if: success()
         uses: marocchino/sticky-pull-request-comment@v3
         with:
@@ -307,13 +231,15 @@ jobs:
 
             Resources `${{ github.event.number }}-*` se smažou po zavření PR.
 
+      # failure() v single jobu pokryva VSECHNY predchozi kroky (install/provision/migrate/seed/
+      # deploy/health/testy) — komentar uz nezustane viset na „se nasazuje…" jako u multi-job varianty.
       - if: failure()
         uses: marocchino/sticky-pull-request-comment@v3
         with:
           header: preview
           message: |
             ### ❌ Preview pro PR #${{ github.event.number }} selhal
-            Deploy nebo health check neprošel. [Detail běhu](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            Provision, migrace/seed, deploy nebo health check neprošel. [Detail běhu](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
   cleanup:
     if: github.event.action == 'closed'

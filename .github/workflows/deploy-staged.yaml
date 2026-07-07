@@ -22,7 +22,8 @@ name: deploy-sdk staged
 #   jobs:
 #     deploy:
 #       uses: develit-io/develit-workflows/.github/workflows/deploy-staged.yaml@v1
-#       # actions: read jen s affected: true (nx-set-shas) — GH validuje perms při startu runu
+#       # actions: read nutny VZDY (job ho requestuje staticky pro nx-set-shas; GH validuje
+#       # perms při startu runu i při affected: false — jinak startup_failure)
 #       permissions: { contents: write, packages: read, actions: read }
 #       secrets: ...
 #       with:
@@ -76,7 +77,7 @@ jobs:
           fetch-depth: ${{ inputs.affected && '0' || '1' }}
       # Baseline pro affected: SHA posledniho USPESNEHO runu tohoto workflow na teto vetvi →
       # exportuje NX_BASE/NX_HEAD do env. Prvni run na vetvi baseline nema → fail-open (vsechno).
-      - uses: nrwl/nx-set-shas@v4
+      - uses: nrwl/nx-set-shas@v5
         if: inputs.affected
         with:
           main-branch-name: ${{ github.ref_name }}

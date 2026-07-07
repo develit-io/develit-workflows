@@ -1,5 +1,12 @@
 name: deploy-sdk stable
 
+# ⚠ DEPRECATED — pouzij deploy-staged.yaml@v1 (single job: 1 install misto 4, service-graf
+# poradi, volitelny affected). Migrace wrapperu: uses: → deploy-staged.yaml@v1 + grant
+# `actions: read` (nx-set-shas; GH validuje perms reusable jobu pri startu). Semanticke rozdily:
+# releaselog bezi az PO health checku (health fail = zadny release), artefakt url-<worker> →
+# url-all, check names provision/migrate/deploy(w)/smoke/releaselog → deploy.
+# Tenhle soubor je zmrazeny pro stavajici konzumenty — nove funkce jdou jen do deploy-staged.
+#
 # Reusable stable deploy (workflow_call) — provision → migrate → deploy → health-check pro push
 # do stable vetvi. CI gate je consumer concern (job s ci-sdk + needs v jeho wrapperu):
 #

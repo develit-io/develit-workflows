@@ -2,6 +2,11 @@ name: ci-sdk
 
 # Reusable CI (workflow_call) — obaluje `bunx ci-sdk`. Consumer = Nx workspace na Bunu
 # s @develit-io/ci-sdk v devDeps. Reference: uses: develit-io/develit-workflows/.github/workflows/ci.yaml@v1
+#
+# JEDEN job: check (ci-sdk) + build krok. Drivejsi targets+build matrix platila 2 dalsi
+# checkout+setup+install (~1 job-min kazdy + per-job billing rounding) — fleet repa maji
+# 1-4 build targety, serialni `nx affected/run-many -t build` v jednom jobu je srovnatelne
+# rychly a o ~2 joby levnejsi. `ci-sdk build-targets` CLI zustava pro jine konzumenty.
 on:
   workflow_call:
     inputs:
@@ -78,65 +83,15 @@ jobs:
           [ "$SKIP_RELEASE_AGE" = "true" ] && args+=(--skip-release-age)
           bunx ci-sdk check "${args[@]}"
 
-  # Spočítá projekty s 'build' targetem (affected-aware) → JSON pro matrix.
-  targets:
-    if: ${{ !inputs.skip-build }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-      packages: read
-    outputs:
-      targets: ${{ steps.t.outputs.targets }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ inputs.bun-version }}
-      - uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-      - run: bun install --frozen-lockfile
-        env:
-          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
-      - uses: nrwl/nx-set-shas@v5
-      - id: t
+      # Build ve stejnem jobu (sdileny install; nx affected respektuje NX_BASE/NX_HEAD
+      # z nx-set-shas vyse). Projekty bez build targetu nx tise preskoci.
+      - name: Build
+        if: ${{ !inputs.skip-build }}
         env:
           AFFECTED: ${{ inputs.affected }}
         run: |
-          args=()
-          [ "$AFFECTED" = "true" ] && args+=(--affected)
-          bunx ci-sdk build-targets "${args[@]}"
-
-  build:
-    needs: targets
-    if: ${{ !inputs.skip-build && needs.targets.outputs.targets != '[]' && needs.targets.outputs.targets != '' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: read # GH Packages pull (@develit-io/*) — bez explicit bloku nemusí mít default token scope
-    strategy:
-      matrix:
-        # skip-build skipne targets → output '' → fromJSON('') by byl startup_failure; || '[]' = prázdná matice (build se skipne přes if výše)
-        project: ${{ fromJSON(needs.targets.outputs.targets || '[]') }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: ${{ inputs.bun-version }}
-      - uses: actions/cache@v6
-        with:
-          path: ~/.bun/install/cache
-          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
-      - run: bun install --frozen-lockfile
-        env:
-          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
-      - name: Build project
-        env:
-          PROJECT: ${{ matrix.project }}
-        run: bunx nx build "$PROJECT"
+          if [ "$AFFECTED" = "true" ]; then
+            bunx nx affected -t build
+          else
+            bunx nx run-many -t build
+          fi
