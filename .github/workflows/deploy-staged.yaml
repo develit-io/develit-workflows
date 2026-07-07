@@ -22,10 +22,12 @@ name: deploy-sdk staged
 #   jobs:
 #     deploy:
 #       uses: develit-io/develit-workflows/.github/workflows/deploy-staged.yaml@v1
-#       permissions: { contents: write, packages: read }
+#       # actions: read jen s affected: true (nx-set-shas) — GH validuje perms při startu runu
+#       permissions: { contents: write, packages: read, actions: read }
 #       secrets: ...
 #       with:
 #         env-passthrough: NUXT_GATEWAY_SIGNATURE_KEY,SENTRY_AUTH_TOKEN
+#         affected: true
 on:
   workflow_call:
     inputs:
