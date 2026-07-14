@@ -106,6 +106,12 @@ jobs:
               printf '%s<<__EOF__\n%s\n__EOF__\n' "$k" "$v" >> "$GITHUB_ENV"
             fi
           done
+      # Cert pre-warm nad novejsim SDK nez ma konzument v locku (bunx --package) — rollout bez
+      # consumer bumpu; na 0.26+ konzumentech redundantni (provision to dela sam, idempotentni
+      # attach = no-op). Advisory: nesmi shodit deploy (vc. fetch failu balicku) → || warning.
+      # Bezi PRED provisionem — per-host cert se pece i behem nej (cryptobyte provision ~2 min).
+      - name: Cert pre-warm
+        run: bunx --package @develit-io/deploy-sdk@0.26.0 deploy-sdk prewarm || echo "::warning::cert pre-warm preskocen (deploy pokracuje)"
       - id: p
         name: Provision
         run: bunx deploy-sdk provision
