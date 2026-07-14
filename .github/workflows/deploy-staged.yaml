@@ -62,6 +62,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # multi-worker deploy + ACM cert wait + health-check (5 min budget) — strop proti stuck runu (GH default 6 h)
+    timeout-minutes: 30
     permissions:
       contents: write # releaselog (gh release) — gate-off konzumentum staci, GH perms validuje pri startu
       packages: read # GH Packages pull (@develit-io/*) — job perms jinak přebijí callerův grant → 403

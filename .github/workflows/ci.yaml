@@ -33,6 +33,8 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # wrangler types umí intermitentně viset (4.110, cryptobyte 07-14: 24 min) — bez limitu GH default 6 h
+    timeout-minutes: 15
     # actions:read → nrwl/nx-set-shas dotazuje Actions API (poslední úspěšný run na větvi) na push eventech.
     permissions:
       contents: read
