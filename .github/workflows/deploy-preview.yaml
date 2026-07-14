@@ -106,12 +106,23 @@ jobs:
               printf '%s<<__EOF__\n%s\n__EOF__\n' "$k" "$v" >> "$GITHUB_ENV"
             fi
           done
-      # Cert pre-warm nad novejsim SDK nez ma konzument v locku (bunx --package) — rollout bez
-      # consumer bumpu; na 0.26+ konzumentech redundantni (provision to dela sam, idempotentni
-      # attach = no-op). Advisory: nesmi shodit deploy (vc. fetch failu balicku) → || warning.
-      # Bezi PRED provisionem — per-host cert se pece i behem nej (cryptobyte provision ~2 min).
+      # Cert pre-warm nad novejsim SDK nez ma konzument v locku — rollout bez consumer bumpu;
+      # na 0.26+ konzumentech redundantni (provision to dela sam, idempotentni attach = no-op).
+      # Advisory: nesmi shodit deploy → || warning. Bezi PRED provisionem (cert se pece i behem nej).
+      # Temp projekt s vlastnim bunfig scope — bunx globalni config je na Linux runnerech
+      # nespolehlivy (npmjs 404), stejny trap a pattern jako deps-update.yaml Install dvl CLI.
       - name: Cert pre-warm
-        run: bunx --package @develit-io/deploy-sdk@0.26.0 deploy-sdk prewarm || echo "::warning::cert pre-warm preskocen (deploy pokracuje)"
+        env:
+          DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN || github.token }}
+        run: |
+          {
+            mkdir -p /tmp/prewarm-sdk && cd /tmp/prewarm-sdk
+            printf '{"dependencies":{"@develit-io/deploy-sdk":"0.26.0"}}' > package.json
+            printf '[install.scopes]\n"@develit-io" = { url = "https://npm.pkg.github.com/", token = "$DEVELIT_PACKAGES_TOKEN" }\n' > bunfig.toml
+            bun install --ignore-scripts
+            cd "$GITHUB_WORKSPACE"
+            /tmp/prewarm-sdk/node_modules/.bin/deploy-sdk prewarm
+          } || echo "::warning::cert pre-warm preskocen (deploy pokracuje)"
       - id: p
         name: Provision
         run: bunx deploy-sdk provision
