@@ -119,7 +119,7 @@ jobs:
         run: |
           {
             mkdir -p /tmp/prewarm-sdk && cd /tmp/prewarm-sdk
-            printf '{"dependencies":{"@develit-io/deploy-sdk":"0.26.0"}}' > package.json
+            printf '{"dependencies":{"@develit-io/deploy-sdk":"0.27.0"}}' > package.json
             printf '[install.scopes]\n"@develit-io" = { url = "https://npm.pkg.github.com/", token = "$DEVELIT_PACKAGES_TOKEN" }\n' > bunfig.toml
             bun install --ignore-scripts
             cd "$GITHUB_WORKSPACE"
