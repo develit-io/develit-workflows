@@ -50,11 +50,11 @@ jobs:
         with:
           bun-version: ${{ inputs.bun-version }}
 
+      # Bez restore-keys — viz fleet-dashboard.yaml (snowball: restore starého supersetu je dražší než cold install)
       - uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-${{ runner.os }}-
 
       - run: bun install --frozen-lockfile
         env:
