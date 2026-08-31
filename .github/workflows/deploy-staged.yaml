@@ -221,3 +221,15 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bunx deploy-sdk releaselog
+
+      # Poke fleet ingest — po stable deployi (typicky merge do work/deploy branche) si karta repa
+      # hned přetáhne čerstvý stav (bun.lock/deps po merge, PR list) místo čekání na cron.
+      # Aditivní best-effort krok (moving tag v1 — nesmí rozbít konzumenty ani shodit deploy).
+      - name: Poke fleet ingest
+        continue-on-error: true
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          curl -sS -m 10 -X POST https://fleet-api.develit.dev/ingest \
+            -H 'content-type: application/json' \
+            -d "{\"repo\":\"$REPO\",\"reason\":\"deploy\"}" || true

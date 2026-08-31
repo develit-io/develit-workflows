@@ -260,6 +260,18 @@ jobs:
             ### ❌ Preview pro PR #${{ github.event.number }} selhal
             Provision, migrace/seed, deploy nebo health check neprošel. [Detail běhu](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
+      # Poke fleet ingest — preview deploy změnil stav PR (checks, preview URL) → karta repa
+      # si ho hned přetáhne. always(): i fail je změna stavu. Aditivní best-effort (moving tag v1).
+      - name: Poke fleet ingest
+        if: always()
+        continue-on-error: true
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          curl -sS -m 10 -X POST https://fleet-api.develit.dev/ingest \
+            -H 'content-type: application/json' \
+            -d "{\"repo\":\"$REPO\",\"reason\":\"preview\"}" || true
+
   cleanup:
     if: github.event.action == 'closed'
     runs-on: ubuntu-latest
@@ -293,3 +305,14 @@ jobs:
           message: |
             ### 🧹 Preview pro PR #${{ github.event.number }} smazán
             Všechny `${{ github.event.number }}-*` workery + resources odstraněny.
+      # Poke fleet ingest — PR closed (typicky merge) = nejcennější event pro kartu repa
+      # (nový bun.lock/deps na work branchi, zmizelý PR z listu). Aditivní best-effort krok
+      # (moving tag v1 — nesmí rozbít konzumenty ani shodit cleanup).
+      - name: Poke fleet ingest
+        continue-on-error: true
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          curl -sS -m 10 -X POST https://fleet-api.develit.dev/ingest \
+            -H 'content-type: application/json' \
+            -d "{\"repo\":\"$REPO\",\"reason\":\"pr-closed\"}" || true
