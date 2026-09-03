@@ -139,7 +139,6 @@ jobs:
       # Cert pre-warm nad novejsim SDK nez ma konzument v locku — rollout bez consumer bumpu;
       # na 0.26+ konzumentech redundantni (provision to dela sam, idempotentni attach = no-op).
       # Advisory: nesmi shodit deploy → || warning. Bezi PRED provisionem (cert se pece i behem nej).
-      # Pin 0.27.0 nezna konvenci CLOUDFLARE_API_TOKEN_<ENV> → multi-account env na cizim uctu = jen warning.
       # Temp projekt s vlastnim bunfig scope — bunx globalni config je na Linux runnerech
       # nespolehlivy (npmjs 404), stejny trap a pattern jako deps-update.yaml Install dvl CLI.
       - name: Cert pre-warm
@@ -148,7 +147,7 @@ jobs:
         run: |
           {
             mkdir -p /tmp/prewarm-sdk && cd /tmp/prewarm-sdk
-            printf '{"dependencies":{"@develit-io/deploy-sdk":"0.27.0"}}' > package.json
+            printf '{"dependencies":{"@develit-io/deploy-sdk":"0.34.0"}}' > package.json
             printf '[install.scopes]\n"@develit-io" = { url = "https://npm.pkg.github.com/", token = "$DEVELIT_PACKAGES_TOKEN" }\n' > bunfig.toml
             bun install --ignore-scripts
             cd "$GITHUB_WORKSPACE"
