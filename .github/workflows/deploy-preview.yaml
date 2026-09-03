@@ -31,6 +31,7 @@ name: deploy-sdk preview
 #       secrets:
 #         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 #         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+#         CLOUDFLARE_API_TOKENS: ${{ secrets.CLOUDFLARE_API_TOKENS }}  # multi-account (misto CLOUDFLARE_API_TOKEN)
 #         DEVELIT_PACKAGES_TOKEN: ${{ secrets.DEVELIT_PACKAGES_TOKEN }}  # GH Packages read (@develit-io/*)
 #         # jen pokud pouziva env-passthrough — kompaktni 1-line JSON z konkretnich klicu;
 #         # NE toJSON(secrets): viceradkovy secret rozbije redakci GH job outputs (skip output)
@@ -47,7 +48,13 @@ on:
     # (GH inherit mimo org nefunguje — plati nezavisle na tom, ze SDK je pod develit-io).
     # Deklarace nevadi inherit consumerum (inherit required secrets splnuje).
     secrets:
-      CLOUDFLARE_API_TOKEN: { required: true }
+      # Single-account: ambient token (org secret). Multi-account: misto nej CLOUDFLARE_API_TOKENS (nize);
+      # krok "CF tokens" fail-fastne, kdyz chybi oba.
+      CLOUDFLARE_API_TOKEN: { required: false }
+      # Multi-account: 1-line JSON {"dev":"<tok>","staging":"<tok>","prod":"<tok>"} — hodnota = CF API token
+      # uctu daneho env (accountId deklaruje topology.environments.<env>.accountId). staging prazdne = env
+      # neni; preview + gc berou dev. NE viceradkovy (rozbiji redakci job outputs). Cross-org preda explicitne.
+      CLOUDFLARE_API_TOKENS: { required: false }
       CLOUDFLARE_ACCOUNT_ID: { required: true }
       CF_ACCESS_CLIENT_ID: { required: false }
       CF_ACCESS_CLIENT_SECRET: { required: false }
@@ -82,6 +89,28 @@ jobs:
             ### ⏳ Preview pro PR #${{ github.event.number }} se nasazuje…
             [Detail běhu](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
       - uses: actions/checkout@v7
+      # Multi-account: CLOUDFLARE_API_TOKENS (1-line JSON {dev,staging,prod} → token) → per-env
+      # CLOUDFLARE_API_TOKEN_<ENV> do env; SDK je bere prednostne pred ambient tokenem (preview + gc → dev,
+      # production → prod). Hodnoty se maskuji. Bez JSON musi existovat ambient CLOUDFLARE_API_TOKEN.
+      - name: CF tokens (per-env)
+        env:
+          TOKENS_JSON: ${{ secrets.CLOUDFLARE_API_TOKENS }}
+          AMBIENT_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKENS_JSON" ]; then
+            [ -n "$AMBIENT_TOKEN" ] || { echo "::error::chybí CLOUDFLARE_API_TOKEN i CLOUDFLARE_API_TOKENS (cross-org: předat explicitně, viz header)"; exit 1; }
+            exit 0
+          fi
+          [ "$(printf '%s' "$TOKENS_JSON" | wc -l)" -eq 0 ] || { echo "::error::CLOUDFLARE_API_TOKENS musí být 1-line JSON (víceřádkový secret rozbíjí redakci job outputs)"; exit 1; }
+          printf '%s' "$TOKENS_JSON" | jq -e 'type=="object" and all(.[]; type=="string")' >/dev/null || { echo "::error::CLOUDFLARE_API_TOKENS není JSON objekt {env: token}"; exit 1; }
+          for k in $(printf '%s' "$TOKENS_JSON" | jq -r 'keys[]'); do
+            v=$(printf '%s' "$TOKENS_JSON" | jq -r --arg k "$k" '.[$k]')
+            [ -n "$v" ] || continue
+            case "$k" in dev|staging|prod) ;; *) echo "::warning::CLOUDFLARE_API_TOKENS: neznámý klíč '$k' (konvence dev|staging|prod)";; esac
+            echo "::add-mask::$v"
+            printf '%s<<__EOF__\n%s\n__EOF__\n' "CLOUDFLARE_API_TOKEN_$(printf '%s' "$k" | tr '[:lower:]-' '[:upper:]_')" "$v" >> "$GITHUB_ENV"
+          done
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ inputs.bun-version }}
@@ -109,6 +138,7 @@ jobs:
       # Cert pre-warm nad novejsim SDK nez ma konzument v locku — rollout bez consumer bumpu;
       # na 0.26+ konzumentech redundantni (provision to dela sam, idempotentni attach = no-op).
       # Advisory: nesmi shodit deploy → || warning. Bezi PRED provisionem (cert se pece i behem nej).
+      # Pin 0.27.0 nezna konvenci CLOUDFLARE_API_TOKEN_<ENV> → multi-account env na cizim uctu = jen warning.
       # Temp projekt s vlastnim bunfig scope — bunx globalni config je na Linux runnerech
       # nespolehlivy (npmjs 404), stejny trap a pattern jako deps-update.yaml Install dvl CLI.
       - name: Cert pre-warm
@@ -287,6 +317,28 @@ jobs:
       PR_NUMBER: ${{ github.event.number }}
     steps:
       - uses: actions/checkout@v7
+      # Multi-account: CLOUDFLARE_API_TOKENS (1-line JSON {dev,staging,prod} → token) → per-env
+      # CLOUDFLARE_API_TOKEN_<ENV> do env; SDK je bere prednostne pred ambient tokenem (preview + gc → dev,
+      # production → prod). Hodnoty se maskuji. Bez JSON musi existovat ambient CLOUDFLARE_API_TOKEN.
+      - name: CF tokens (per-env)
+        env:
+          TOKENS_JSON: ${{ secrets.CLOUDFLARE_API_TOKENS }}
+          AMBIENT_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKENS_JSON" ]; then
+            [ -n "$AMBIENT_TOKEN" ] || { echo "::error::chybí CLOUDFLARE_API_TOKEN i CLOUDFLARE_API_TOKENS (cross-org: předat explicitně, viz header)"; exit 1; }
+            exit 0
+          fi
+          [ "$(printf '%s' "$TOKENS_JSON" | wc -l)" -eq 0 ] || { echo "::error::CLOUDFLARE_API_TOKENS musí být 1-line JSON (víceřádkový secret rozbíjí redakci job outputs)"; exit 1; }
+          printf '%s' "$TOKENS_JSON" | jq -e 'type=="object" and all(.[]; type=="string")' >/dev/null || { echo "::error::CLOUDFLARE_API_TOKENS není JSON objekt {env: token}"; exit 1; }
+          for k in $(printf '%s' "$TOKENS_JSON" | jq -r 'keys[]'); do
+            v=$(printf '%s' "$TOKENS_JSON" | jq -r --arg k "$k" '.[$k]')
+            [ -n "$v" ] || continue
+            case "$k" in dev|staging|prod) ;; *) echo "::warning::CLOUDFLARE_API_TOKENS: neznámý klíč '$k' (konvence dev|staging|prod)";; esac
+            echo "::add-mask::$v"
+            printf '%s<<__EOF__\n%s\n__EOF__\n' "CLOUDFLARE_API_TOKEN_$(printf '%s' "$k" | tr '[:lower:]-' '[:upper:]_')" "$v" >> "$GITHUB_ENV"
+          done
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ inputs.bun-version }}
