@@ -24,6 +24,12 @@ on:
       affected: { type: boolean, default: false }
       # Pinned (reproducible toolchain; >= 1.3 nutne pro bunfig minimumReleaseAge). Konzument muze prepsat.
       bun-version: { type: string, default: '1.3.12' }
+      # Promotion drift guard (PR do těchto větví): base má ne-merge commity, které head nemá = hotfix
+      # v prod bez back-merge. Nahrazuje strict required checks (ty na promotion větvi chtějí
+      # „Update branch" u každého PR, protože merge commit promotion žije jen na prod). CSV větví.
+      promotion-branches: { type: string, default: 'staging,prod,production' }
+      # warn = ::warning + summary; fail = job červený (zapnout až po back-merge existujícího driftu)
+      promotion-drift: { type: string, default: 'warn' }
     secrets:
       # GH Packages read token pro @develit-io/* private install. Cross-org = per-zakaznik token;
       # nepredano (same-org) -> fallback na caller GITHUB_TOKEN (vyzaduje permissions: packages: read).
@@ -49,6 +55,36 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ inputs.bun-version }}
+
+      # compare head...base = commity jen v base; 1 parent = skutečný commit (merge commity promotion
+      # z minula mají 2 rodiče a nejsou drift). GET jen na vlastním repu → stačí contents: read.
+      - name: Promotion drift
+        if: ${{ github.event_name == 'pull_request' && contains(format(',{0},', inputs.promotion-branches), format(',{0},', github.base_ref)) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          MODE: ${{ inputs.promotion-drift }}
+        run: |
+          drift=$(gh api "repos/${{ github.repository }}/compare/$HEAD...$BASE" \
+            --jq '[.commits[] | select(.parents | length == 1) | "\(.sha[0:7]) \(.commit.message | split("\n")[0])"] | .[]')
+          if [ -z "$drift" ]; then
+            echo "promotion drift: $BASE nemá commity mimo $HEAD"
+            exit 0
+          fi
+          n=$(printf '%s\n' "$drift" | wc -l | tr -d ' ')
+          {
+            echo "### Promotion drift: \`$BASE\` má $n commit(ů) mimo \`$HEAD\`"
+            echo "Nejdřív back-merge \`$BASE\` → \`$HEAD\` (jinak se hotfixy z $BASE ztratí)."
+            echo '```'
+            printf '%s\n' "$drift"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$MODE" = "fail" ]; then
+            echo "::error::promotion drift: $BASE má $n commit(ů) mimo $HEAD — back-merge nejdřív"
+            exit 1
+          fi
+          echo "::warning::promotion drift: $BASE má $n commit(ů) mimo $HEAD — back-merge doporučen"
 
       # Bez restore-keys — viz fleet-dashboard.yaml (snowball: restore starého supersetu je dražší než cold install)
       - uses: actions/cache@v6
