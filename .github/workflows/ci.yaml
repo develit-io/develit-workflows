@@ -28,8 +28,8 @@ on:
       # (LRF `ubuntu-latest-l`: moneio testy 2m02 vs 6m15 na standardu) ho předá; resolvuje se v kontextu volajícího.
       runs-on: { type: string, default: 'ubuntu-latest' }
       # Promotion drift guard (PR do těchto větví): base má ne-merge commity, které head nemá = hotfix
-      # v prod bez back-merge. Nahrazuje strict required checks (ty na promotion větvi chtějí
-      # „Update branch" u každého PR, protože merge commit promotion žije jen na prod). CSV větví.
+      # v prod bez back-merge. Záchytná síť pro repa bez strict required checks (kánon fleetu má
+      # strict ON, kde je strict, krok je vždy zelený). CSV větví.
       promotion-branches: { type: string, default: 'staging,prod,production' }
       # warn = ::warning + summary; fail = job červený (zapnout až po back-merge existujícího driftu)
       promotion-drift: { type: string, default: 'warn' }
