@@ -40,6 +40,9 @@ on:
   workflow_call:
     inputs:
       bun-version: { type: string, default: '1.3.12' }
+      # Runner label (vzor ci.yaml): default GH standard (2 vCPU). Konzument s larger runnerem
+      # (LRF `ubuntu-latest-l`) ho předá — bun install + nuxt build jsou CPU-bound; resolvuje se v kontextu volajícího.
+      runs-on: { type: string, default: 'ubuntu-latest' }
       smoke-script: { type: string, default: scripts/smoke.sh }
       # CSV jmen GH secrets, ktere se exportuji do env pred provision/deploy —
       # topology.ts je cte pres process.env (vars workeru). Hodnoty se maskuji.
@@ -68,7 +71,7 @@ on:
 jobs:
   preview:
     if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     # provision (EU D1, cert) + deploy + health-check — strop proti stuck runu (GH default 6 h)
     timeout-minutes: 30
     permissions:
@@ -303,7 +306,7 @@ jobs:
 
   cleanup:
     if: github.event.action == 'closed'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     # teardown per-PR zdrojů — strop proti stuck runu
     timeout-minutes: 15
     permissions:
