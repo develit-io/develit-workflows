@@ -27,12 +27,12 @@ on:
       # Runner label. Default = GH standard (private repo 2 vCPU). Konzument s vlastním larger runnerem
       # (LRF `ubuntu-latest-l`: moneio testy 2m02 vs 6m15 na standardu) ho předá; resolvuje se v kontextu volajícího.
       runs-on: { type: string, default: 'ubuntu-latest' }
-      # Promotion drift guard (PR do těchto větví): base má ne-merge commity, které head nemá = hotfix
-      # v prod bez back-merge. Záchytná síť pro repa bez strict required checks (kánon fleetu má
-      # strict ON, kde je strict, krok je vždy zelený). CSV větví.
+      # Promotion drift guard (PR do těchto větví): base obsahuje změny souborů, které head nemá = hotfix
+      # v prod bez back-merge. Kánon fleetu má na promotion strict OFF (revize 10-02) — tohle je jediná
+      # záruka, že hotfix nezůstane mimo dev. CSV větví.
       promotion-branches: { type: string, default: 'staging,prod,production' }
-      # warn = ::warning + summary; fail = job červený (zapnout až po back-merge existujícího driftu)
-      promotion-drift: { type: string, default: 'warn' }
+      # fail = job červený (default); warn = ::warning + summary (repo s existujícím driftem do back-merge)
+      promotion-drift: { type: string, default: 'fail' }
     secrets:
       # GH Packages read token pro @develit-io/* private install. Cross-org = per-zakaznik token;
       # nepredano (same-org) -> fallback na caller GITHUB_TOKEN (vyzaduje permissions: packages: read).
@@ -59,8 +59,9 @@ jobs:
         with:
           bun-version: ${{ inputs.bun-version }}
 
-      # compare head...base = commity jen v base; 1 parent = skutečný commit (merge commity promotion
-      # z minula mají 2 rodiče a nejsou drift). GET jen na vlastním repu → stačí contents: read.
+      # compare head...base .files = diff merge-base → base: co base obsahuje navíc proti head. Merge commity
+      # promotion z minula mají 0 souborů (nejsou drift); chytí i obsah schovaný v merge commitu (conflict
+      # resolution), který filtr na 1-parent commity neviděl. GET jen na vlastním repu → stačí contents: read.
       - name: Promotion drift
         if: ${{ github.event_name == 'pull_request' && contains(format(',{0},', inputs.promotion-branches), format(',{0},', github.base_ref)) }}
         env:
@@ -70,24 +71,24 @@ jobs:
           MODE: ${{ inputs.promotion-drift }}
         run: |
           drift=$(gh api "repos/${{ github.repository }}/compare/$HEAD...$BASE" \
-            --jq '[.commits[] | select(.parents | length == 1) | "\(.sha[0:7]) \(.commit.message | split("\n")[0])"] | .[]')
+            --jq '.files[]? | "\(.status) \(.filename)"')
           if [ -z "$drift" ]; then
-            echo "promotion drift: $BASE nemá commity mimo $HEAD"
+            echo "promotion drift: $BASE nemá změny mimo $HEAD"
             exit 0
           fi
           n=$(printf '%s\n' "$drift" | wc -l | tr -d ' ')
           {
-            echo "### Promotion drift: \`$BASE\` má $n commit(ů) mimo \`$HEAD\`"
+            echo "### Promotion drift: \`$BASE\` má změny v $n soubor(ech) mimo \`$HEAD\`"
             echo "Nejdřív back-merge \`$BASE\` → \`$HEAD\` (jinak se hotfixy z $BASE ztratí)."
             echo '```'
             printf '%s\n' "$drift"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$MODE" = "fail" ]; then
-            echo "::error::promotion drift: $BASE má $n commit(ů) mimo $HEAD — back-merge nejdřív"
+            echo "::error::promotion drift: $BASE má změny v $n soubor(ech) mimo $HEAD — back-merge nejdřív"
             exit 1
           fi
-          echo "::warning::promotion drift: $BASE má $n commit(ů) mimo $HEAD — back-merge doporučen"
+          echo "::warning::promotion drift: $BASE má změny v $n soubor(ech) mimo $HEAD — back-merge doporučen"
 
       # Bez restore-keys — viz fleet-dashboard.yaml (snowball: restore starého supersetu je dražší než cold install)
       - uses: actions/cache@v6
